@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Séance
+GenericName=Terminal
+Comment=Terminal built on the Ghostty core, with agent control
+Exec=seance
+Icon=utilities-terminal
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=shell;prompt;command;commandline;cmd;
+StartupWMClass=seance

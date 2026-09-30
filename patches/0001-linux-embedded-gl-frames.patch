@@ -1,0 +1,235 @@
+diff --git a/build.zig b/build.zig
+index d09cc17..0ff68d9 100644
+--- a/build.zig
++++ b/build.zig
+@@ -229,6 +229,8 @@ pub fn build(b: *std.Build) !void {
+         // We shouldn't have this guard but we don't currently
+         // build on macOS this way ironically so we need to fix that.
+         if (!config.target.result.os.tag.isDarwin()) {
++            // seance: also emit resources (terminfo, shell integration, themes) for Linux hosts.
++            if (config.target.result.os.tag == .linux) resources.install();
+             lib_shared.installHeader(); // Only need one header
+             if (config.target.result.os.tag == .windows) {
+                 lib_shared.install("ghostty-internal.dll");
+diff --git a/include/ghostty.h b/include/ghostty.h
+index eec6550..328ee02 100644
+--- a/include/ghostty.h
++++ b/include/ghostty.h
+@@ -70,6 +70,7 @@ typedef enum {
+   GHOSTTY_PLATFORM_INVALID,
+   GHOSTTY_PLATFORM_MACOS,
+   GHOSTTY_PLATFORM_IOS,
++  GHOSTTY_PLATFORM_LINUX,
+ } ghostty_platform_e;
+ 
+ typedef enum {
+@@ -494,9 +495,14 @@ typedef struct {
+   void* uiview;
+ } ghostty_platform_ios_s;
+ 
++typedef struct {
++  void* reserved;
++} ghostty_platform_linux_s;
++
+ typedef union {
+   ghostty_platform_macos_s macos;
+   ghostty_platform_ios_s ios;
++  ghostty_platform_linux_s linux_;
+ } ghostty_platform_u;
+ 
+ typedef enum {
+@@ -1186,6 +1192,19 @@ GHOSTTY_API bool ghostty_surface_needs_confirm_quit(ghostty_surface_t);
+ GHOSTTY_API bool ghostty_surface_process_exited(ghostty_surface_t);
+ GHOSTTY_API void ghostty_surface_refresh(ghostty_surface_t);
+ GHOSTTY_API void ghostty_surface_draw(ghostty_surface_t);
++
++// Linux host: a finished frame (premultiplied RGBA8, `stride` bytes per row).
++// Call ghostty_surface_take_frame after GHOSTTY_ACTION_RENDER; release the
++// frame with ghostty_surface_release_frame when done painting it.
++typedef struct {
++  uint32_t width;
++  uint32_t height;
++  uint32_t stride;
++  const uint8_t* pixels;
++  void* handle;
++} ghostty_frame_s;
++GHOSTTY_API bool ghostty_surface_take_frame(ghostty_surface_t, ghostty_frame_s*);
++GHOSTTY_API void ghostty_surface_release_frame(ghostty_surface_t, void*);
+ GHOSTTY_API void ghostty_surface_set_content_scale(ghostty_surface_t, double, double);
+ GHOSTTY_API void ghostty_surface_set_focus(ghostty_surface_t, bool);
+ GHOSTTY_API void ghostty_surface_set_occlusion(ghostty_surface_t, bool);
+diff --git a/pkg/opengl/egl.zig b/pkg/opengl/egl.zig
+index 81f1c14..f142d2b 100644
+--- a/pkg/opengl/egl.zig
++++ b/pkg/opengl/egl.zig
+@@ -74,7 +74,7 @@ pub fn bindApi(api: c.EGLenum) Error!void {
+ pub const Display = opaque {
+     pub fn initPlatform(
+         platform: c.EGLenum,
+-        id: c.EGLNativeDisplayType,
++        id: ?*anyopaque,
+         attribs: ?[*:c.EGL_NONE]const c.EGLAttrib,
+     ) Error!*Display {
+         const display = c.eglGetPlatformDisplay(platform, id, attribs) orelse return mustError();
+diff --git a/src/apprt/embedded.zig b/src/apprt/embedded.zig
+index b90366a..a3470e8 100644
+--- a/src/apprt/embedded.zig
++++ b/src/apprt/embedded.zig
+@@ -383,6 +383,10 @@ pub const Platform = union(PlatformTag) {
+     macos: MacOS,
+     ios: IOS,
+ 
++    /// Linux host: no native view. The core renders offscreen (surfaceless EGL) and
++    /// the host pulls finished CPU frames via ghostty_surface_take_frame.
++    linux: void,
++
+     // If our build target for libghostty is not darwin then we do
+     // not include macos support at all.
+     pub const MacOS = if (builtin.target.os.tag.isDarwin()) struct {
+@@ -405,6 +409,10 @@ pub const Platform = union(PlatformTag) {
+         ios: extern struct {
+             uiview: ?*anyopaque,
+         },
++
++        linux: extern struct {
++            reserved: ?*anyopaque,
++        },
+     };
+ 
+     /// Initialize a Platform a tag and configuration from the C ABI.
+@@ -424,6 +432,8 @@ pub const Platform = union(PlatformTag) {
+                     break :ios error.UIViewMustBeSet);
+                 break :ios .{ .ios = .{ .uiview = uiview } };
+             } else error.UnsupportedPlatform,
++
++            .linux => .{ .linux = {} },
+         };
+     }
+ };
+@@ -434,6 +444,7 @@ pub const PlatformTag = enum(c_int) {
+ 
+     macos = 1,
+     ios = 2,
++    linux = 3,
+ };
+ 
+ pub const EnvVar = extern struct {
+@@ -629,6 +640,12 @@ pub const Surface = struct {
+             font_size.points = opts.font_size;
+             try self.core_surface.setFontSize(font_size);
+         }
++
++        // The Linux host presents CPU frames (no dmabuf import), so tell the
++        // renderer to export memory frames.
++        if (comptime builtin.target.os.tag == .linux) {
++            self.core_surface.reportPresentationHealth(.unhealthy);
++        }
+     }
+ 
+     pub fn deinit(self: *Surface) void {
+@@ -1951,6 +1968,55 @@ pub const CAPI = struct {
+         surface.draw();
+     }
+ 
++    /// A finished frame for hosts that composite CPU pixels (Linux).
++    /// Premultiplied RGBA8, `stride` bytes per row. Release with
++    /// ghostty_surface_release_frame when done.
++    pub const Frame = extern struct {
++        width: u32,
++        height: u32,
++        stride: u32,
++        pixels: ?[*]const u8,
++        handle: ?*anyopaque,
++    };
++
++    /// Take the latest rendered frame, if any. Call after receiving
++    /// GHOSTTY_ACTION_RENDER. Returns false if no frame is available.
++    export fn ghostty_surface_take_frame(surface: *Surface, out: *Frame) bool {
++        const R = @TypeOf(surface.core_surface.renderer);
++        if (comptime R.ExportedFrame == void) return false;
++        const frame = surface.core_surface.renderer.takeFrame() orelse return false;
++        switch (frame) {
++            .memory => |m| {
++                const h = surface.app.core_app.alloc.create(R.ExportedFrame) catch {
++                    frame.deinit();
++                    return false;
++                };
++                h.* = frame;
++                out.* = .{
++                    .width = m.width,
++                    .height = m.height,
++                    .stride = m.width * 4,
++                    .pixels = m.pixels.ptr,
++                    .handle = h,
++                };
++                return true;
++            },
++            .dmabuf => {
++                frame.deinit();
++                return false;
++            },
++        }
++    }
++
++    /// Release a frame obtained from ghostty_surface_take_frame.
++    export fn ghostty_surface_release_frame(surface: *Surface, handle: ?*anyopaque) void {
++        const R = @TypeOf(surface.core_surface.renderer);
++        if (comptime R.ExportedFrame == void) return;
++        const h: *R.ExportedFrame = @ptrCast(@alignCast(handle orelse return));
++        h.deinit();
++        surface.app.core_app.alloc.destroy(h);
++    }
++
+     /// Update the size of a surface. This will trigger resize notifications
+     /// to the pty and the renderer.
+     export fn ghostty_surface_set_size(surface: *Surface, w: u32, h: u32) void {
+diff --git a/src/build/SharedDeps.zig b/src/build/SharedDeps.zig
+index 7f777fa..17b91da 100644
+--- a/src/build/SharedDeps.zig
++++ b/src/build/SharedDeps.zig
+@@ -653,6 +653,15 @@ pub fn add(
+         }
+     }
+ 
++    // libghostty on Linux (app-runtime=none): the core renders through its own
++    // surfaceless EGL device, so the library itself needs glad compiled in. (GTK
++    // exe builds get glad in the block below.) glad dlopens libEGL at runtime.
++    if (step.kind == .lib and self.config.app_runtime == .none and target.result.os.tag == .linux) {
++        step.root_module.addIncludePath(b.path("vendor/glad/include/"));
++        step.root_module.addCSourceFile(.{ .file = b.path("vendor/glad/src/gl.c"), .flags = &.{} });
++        step.root_module.addCSourceFile(.{ .file = b.path("vendor/glad/src/glad_egl.c"), .flags = &.{} });
++    }
++
+     // If we're building an exe then we have additional dependencies.
+     if (step.kind != .lib) {
+         // We always statically compile glad
+diff --git a/src/renderer/generic.zig b/src/renderer/generic.zig
+index 54d6a47..ea6c8fa 100644
+--- a/src/renderer/generic.zig
++++ b/src/renderer/generic.zig
+@@ -230,7 +230,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
+         ///
+         /// This is separate from `health` because a renderer
+         /// can produce healthy frames that the apprt can't present.
+-        presentation_health: std.atomic.Value(Health) = .{ .raw = .healthy },
++        presentation_health: std.atomic.Value(Health) = .{
++            // seance: the Linux embedded host presents CPU frames only. Starting "healthy" lets the first frame try a
++            // DMABUF export before the host's `unhealthy` report arrives, which crashes inside Mesa's software EGL driver.
++            .raw = if (builtin.os.tag == .linux and apprt.runtime == apprt.embedded) .unhealthy else .healthy,
++        },
+ 
+         /// True when we have a graphics context that can create GPU
+         /// resources. Creating any GPU resource while this is false is invalid.
+diff --git a/src/renderer/opengl/Device.zig b/src/renderer/opengl/Device.zig
+index 76ffb63..5a9e4e1 100644
+--- a/src/renderer/opengl/Device.zig
++++ b/src/renderer/opengl/Device.zig
+@@ -32,7 +32,7 @@ pub fn init(self: *Device, alloc: Allocator) !void {
+ 
+     const display: *egl.Display = try .initPlatform(
+         egl.c.EGL_PLATFORM_SURFACELESS_MESA,
+-        egl.c.EGL_DEFAULT_DISPLAY,
++        null, // EGL_DEFAULT_DISPLAY
+         null,
+     );
+ 

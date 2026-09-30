@@ -1,0 +1,16 @@
+# Ghostty checkout (fetch with scripts/fetch-ghostty.sh) and build outputs
+/ghostty/
+/full/
+/vt/
+/out/
+/dist/
+/stage/
+/host/seance
+/host/seance-host
+/host/seancectl
+/host/*.o
+/seance
+*.o
+.zig-cache/
+core
+core.*
