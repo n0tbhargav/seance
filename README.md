@@ -24,13 +24,13 @@ Prebuilt x86-64 binaries are on the [Releases page](https://github.com/n0tbharga
 
 **Tarball (no root needed; relocatable — extract anywhere):**
 ```sh
-curl -LO https://github.com/n0tbhargav/seance/releases/latest/download/seance-0.1.0-linux-x86_64.tar.gz
+curl -LO https://github.com/n0tbhargav/seance/releases/download/v0.1.0/seance-0.1.0-linux-x86_64.tar.gz
 mkdir -p ~/apps && tar xzf seance-0.1.0-linux-x86_64.tar.gz -C ~/apps
 ~/apps/seance/bin/seance
 ```
 **RPM (system-wide: /opt/seance, /usr/bin/seance, /usr/bin/seancectl, menu entry):**
 ```sh
-curl -LO https://github.com/n0tbhargav/seance/releases/latest/download/seance-0.1.0-1.x86_64.rpm
+curl -LO https://github.com/n0tbhargav/seance/releases/download/v0.1.0/seance-0.1.0-1.x86_64.rpm
 sudo rpm -Uvh seance-0.1.0-1.x86_64.rpm
 ```
 Verify downloads against `SHA256SUMS` on the release page.
