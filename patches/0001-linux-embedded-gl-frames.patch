@@ -233,3 +233,25 @@ index 76ffb63..5a9e4e1 100644
          null,
      );
  
+diff --git a/src/termio/Exec.zig b/src/termio/Exec.zig
+index 8c7123f..c2e1b65 100644
+--- a/src/termio/Exec.zig
++++ b/src/termio/Exec.zig
+@@ -1179,8 +1179,16 @@ const Subprocess = struct {
+         // and repeatedly kill the process group until all
+         // descendents are well and truly dead. We will not rest
+         // until the entire family tree is obliterated.
++        //
++        // seance: SIGHUP is only a polite request; a child that ignores it (a shell running a
++        // program that traps HUP, some agents/daemons) would make this loop, and the GUI thread
++        // that is closing the surface, block until that process ends. After a short grace period
++        // escalate to SIGKILL (which cannot be ignored) so closing a pane is always bounded.
++        var attempts: usize = 0;
+         while (true) {
+-            switch (posix.errno(c.killpg(pgid, c.SIGHUP))) {
++            const sig: c_int = if (attempts >= 50) c.SIGKILL else c.SIGHUP; // 50 * 10ms = 0.5s grace
++            attempts += 1;
++            switch (posix.errno(c.killpg(pgid, sig))) {
+                 .SUCCESS => log.debug("process group killed pgid={}", .{pgid}),
+                 else => |err| killpg: {
+                     if ((comptime builtin.target.os.tag.isDarwin()) and

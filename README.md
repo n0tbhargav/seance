@@ -24,14 +24,14 @@ Prebuilt x86-64 binaries are on the [Releases page](https://github.com/n0tbharga
 
 **Tarball (no root needed; relocatable — extract anywhere):**
 ```sh
-curl -LO https://github.com/n0tbhargav/seance/releases/download/v0.1.1/seance-0.1.1-linux-x86_64.tar.gz
-mkdir -p ~/apps && tar xzf seance-0.1.1-linux-x86_64.tar.gz -C ~/apps
+curl -LO https://github.com/n0tbhargav/seance/releases/download/v0.1.2/seance-0.1.2-linux-x86_64.tar.gz
+mkdir -p ~/apps && tar xzf seance-0.1.2-linux-x86_64.tar.gz -C ~/apps
 ~/apps/seance/bin/seance
 ```
 **RPM (system-wide: /opt/seance, /usr/bin/seance, /usr/bin/seancectl, menu entry):**
 ```sh
-curl -LO https://github.com/n0tbhargav/seance/releases/download/v0.1.1/seance-0.1.1-1.x86_64.rpm
-sudo rpm -Uvh seance-0.1.1-1.x86_64.rpm
+curl -LO https://github.com/n0tbhargav/seance/releases/download/v0.1.2/seance-0.1.2-1.x86_64.rpm
+sudo rpm -Uvh seance-0.1.2-1.x86_64.rpm
 ```
 Verify downloads against `SHA256SUMS` on the release page.
 
@@ -77,7 +77,7 @@ Env overrides: `SEANCE_SIZE=1200x800` (initial window), `SEANCE_CMD=...` (run a 
 | Menus | **Right-click** in the terminal (Copy, Paste, Select All, New Tab/Window, Split, Close Pane, Reload/Open Config). **☰** in the tab strip (New Tab/Window, Split, Reload/Open Config, Fullscreen, About, Quit). **Right-click a tab** (Rename, Move, Close, Close Others) |
 
 Programs that use the mouse (vim, tmux with `mouse on`) keep their right-clicks; hold **Shift** to get the menu anyway.
-The tab strip is hidden with a single tab; set `window-show-tab-bar = always` (or `never`) in the config to change that.
+The top bar (tabs, **+**, and the **☰** menu) is always visible. To hide it when there is only one tab set `window-show-tab-bar = auto`, or `never` to hide it entirely.
 Every shortcut can be rebound with `keybind = ...` in `~/.config/ghostty/config.ghostty`.
 
 ### App icon and launcher

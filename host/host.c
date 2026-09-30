@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ghostty.h>
-#define SEANCE_VERSION "0.1.1"
+#define SEANCE_VERSION "0.1.2"
 #include <stdarg.h>
 #include <execinfo.h>
 #include <glib/gstdio.h>
@@ -625,6 +625,14 @@ static void close_tab_of(Pane *p) {
 // background instead (keeps the terminal exactly the theme color, matching the tab strip).
 static ghostty_config_t load_config(void) {
   ghostty_config_t c = ghostty_config_new();
+  {
+    // Séance defaults (loaded BEFORE the user's config, so anything the user sets wins): keep the top bar (tabs + ☰ menu) always visible.
+    const char *rt0 = g_get_user_runtime_dir();
+    gchar *dir0 = rt0 && g_file_test(rt0, G_FILE_TEST_IS_DIR) ? g_strdup(rt0) : g_strdup(g_get_tmp_dir());
+    gchar *dpath = g_build_filename(dir0, "seance-defaults.conf", NULL);
+    if (g_file_set_contents(dpath, "window-show-tab-bar = always\n", -1, NULL)) ghostty_config_load_file(c, dpath);
+    g_free(dpath); g_free(dir0);
+  }
   ghostty_config_load_default_files(c);
   if (!composited_ok) {
     const char *rt = g_get_user_runtime_dir();
@@ -1115,6 +1123,20 @@ static Pane *pane_new(Pane *inherit_from, ghostty_surface_context_e ctx) {
   return p;
 }
 
+// Freeing a surface stops its threads and kills the child process; it can block for a moment. Done after the UI update.
+static GList *pending_free;   // Pane* whose widgets are gone but whose core surface is not freed yet
+static void free_pane_now(Pane *p) {
+  pending_free = g_list_remove(pending_free, p);
+  gint64 t0 = g_get_monotonic_time();
+  if (p->surface) ghostty_surface_free(p->surface);
+  if (g_getenv("SEANCE_STATS")) g_printerr("surface free took %.0f ms\n", (g_get_monotonic_time() - t0) / 1000.0);
+  if (p->img) cairo_surface_destroy(p->img);
+  if (p->im) g_object_unref(p->im);
+  g_free(p->title);
+  g_free(p);
+}
+static gboolean free_pane_cb(gpointer ud) { if (g_list_find(pending_free, ud)) free_pane_now((Pane *)ud); return G_SOURCE_REMOVE; }
+
 // Remove the pane from the widget tree (collapsing splits / dropping the tab) and free it.
 static void pane_close_now(Pane *p) {
   GtkWidget *area = p->area;
@@ -1154,22 +1176,25 @@ static void pane_close_now(Pane *p) {
     gtk_notebook_remove_page(GTK_NOTEBOOK(parent), gtk_notebook_page_num(GTK_NOTEBOOK(parent), area));
   }
 
-  ghostty_surface_free(p->surface);
-  if (p->img) cairo_surface_destroy(p->img);
-  if (p->im) g_object_unref(p->im);
-  g_free(p->title);
-  g_free(p);
-
+  // The pane is already out of the widget tree. Update the UI (tab bar, focus) first, and only THEN free the core surface:
+  // freeing waits for the child process to die, which can take a moment, and must not delay the tab vanishing.
   update_tabs_visible();
-  if (gtk_notebook_get_n_pages(GTK_NOTEBOOK(H.nb)) == 0) { gtk_main_quit(); return; }
-  if (!next_focus) {
-    GtkWidget *root = gtk_notebook_get_nth_page(GTK_NOTEBOOK(H.nb), gtk_notebook_get_current_page(GTK_NOTEBOOK(H.nb)));
-    GList *panes = NULL;
-    collect_panes(root, &panes);
-    if (panes) next_focus = panes->data;
-    g_list_free(panes);
+  gboolean last = gtk_notebook_get_n_pages(GTK_NOTEBOOK(H.nb)) == 0;
+  if (!last) {
+    if (!next_focus) {
+      GtkWidget *root = gtk_notebook_get_nth_page(GTK_NOTEBOOK(H.nb), gtk_notebook_get_current_page(GTK_NOTEBOOK(H.nb)));
+      GList *panes = NULL;
+      collect_panes(root, &panes);
+      if (panes) next_focus = panes->data;
+      g_list_free(panes);
+    }
+    if (next_focus) set_focus_pane(next_focus);
+    pending_free = g_list_append(pending_free, p);
+    g_idle_add_full(G_PRIORITY_LOW, free_pane_cb, p, NULL);   // lower than GDK's redraw priority: repaint happens first
+  } else {
+    free_pane_now(p);      // last pane: we are quitting, free before the app goes away
+    gtk_main_quit();
   }
-  if (next_focus) set_focus_pane(next_focus);
 }
 
 // ---------------------------------------------------------------- control socket (agents / scripting)
@@ -1752,6 +1777,7 @@ int main(int argc, char **argv) {
   for (GList *l = all_panes; l; l = l->next) { Pane *p = l->data; p->closing = TRUE; ghostty_surface_free(p->surface); p->surface = NULL; }
   g_list_free(all_panes);
   all_panes = NULL;
+  while (pending_free) free_pane_now((Pane *)pending_free->data);
   ghostty_app_free(H.app);
   return 0;
 }

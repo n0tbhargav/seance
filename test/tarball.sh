@@ -1,7 +1,7 @@
 #!/bin/bash
 # Relocatable tarball: extract somewhere arbitrary, run as a normal user.
 useradd -m tester 2>/dev/null
-mkdir -p /home/tester/apps && python3 -c "import tarfile; tarfile.open(\"/src/dist/seance-0.1.1-linux-x86_64.tar.gz\").extractall(\"/home/tester/apps\")" && chown -R tester /home/tester/apps
+mkdir -p /home/tester/apps && python3 -c "import tarfile; tarfile.open(\"/src/dist/seance-0.1.2-linux-x86_64.tar.gz\").extractall(\"/home/tester/apps\")" && chown -R tester /home/tester/apps
 Xvfb :9 -screen 0 1280x800x24 -ac >/dev/null 2>&1 &
 sleep 2
 su tester -c '

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Install the RPM into a clean container and run it as a NON-ROOT user from /usr/bin/seance.
-rpm -Uvh --nodeps /src/dist/x86_64/seance-0.1.1-1.x86_64.rpm >/dev/null 2>&1 && echo "rpm installed" || { echo "rpm install failed"; exit 1; }
+rpm -Uvh --nodeps /src/dist/x86_64/seance-0.1.2-1.x86_64.rpm >/dev/null 2>&1 && echo "rpm installed" || { echo "rpm install failed"; exit 1; }
 useradd -m tester 2>/dev/null
 Xvfb :9 -screen 0 1280x800x24 -ac >/dev/null 2>&1 &
 sleep 2

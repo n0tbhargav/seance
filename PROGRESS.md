@@ -178,6 +178,15 @@ Read this first when resuming. Plan: PLAN.md. Memory: seance-terminal-project.
   `window-show-tab-bar` honored; docs ("Using Séance" in README: keys, menus, icon, custom path, fonts, tcsh, SSH/TERM). gui2 coordinates updated for the ☰ button.
   Tests added: glyph.sh keys.sh menus.sh tcsh.sh custompath.sh. Ghostty has NO tcsh integration upstream (bash/zsh/fish/elvish/nushell only).
 
+- **v0.1.2 (user feedback: "closing a tab isn't instantaneous", "top menu should be persistent"; committed locally):**
+  ROOT CAUSE of slow/never-closing tabs: core `killPid` (termio/Exec.zig) loops SIGHUP to the child's process group every 10 ms FOREVER until the
+  child exits; a child that ignores HUP (trap, some agents/daemons) blocked ghostty_surface_free and froze the whole GUI (measured: never returned).
+  Fixes: core patch escalates to SIGKILL after 0.5 s (patches/0001, 257 lines); host removes the pane/tab from the UI FIRST and frees the surface
+  afterwards from a low-priority idle (pending_free list, freed at exit) so the tab vanishes immediately. Verified (test/closetime.sh, closeui.sh):
+  normal close ~0.1 s; stubborn child closes in 0.79 s (was never); screenshot 250 ms after close shows the tab already gone.
+  Persistent top bar: Séance now loads its own defaults (`window-show-tab-bar = always`) BEFORE the user's config, so the tab strip + ☰ menu are always
+  visible; user setting still wins (`auto`/`never`). Full regression passes on the new build.
+
 ## Next
 1. Real-app tests: vim, tmux, less, htop-like (test/apps.sh); double/triple-click word/line select.
 2. Redraw efficiency; vtebench baseline vs. xterm/VTE if available.

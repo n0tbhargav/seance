@@ -1,5 +1,5 @@
 Name:           seance
-Version:        0.1.1
+Version:        0.1.2
 Release:        1
 Summary:        GTK3 terminal built on the Ghostty terminal core
 License:        MIT
