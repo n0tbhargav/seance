@@ -20,6 +20,12 @@ install: seance seancectl
 	install -m 0755 $(CORE)/lib/ghostty-internal.so $(DESTDIR)$(PREFIX)/lib/libghostty.so
 	install -d $(DESTDIR)/usr/share/applications
 	install -m 0644 ../packaging/seance.desktop $(DESTDIR)/usr/share/applications/seance.desktop
+	install -d $(DESTDIR)$(PREFIX)/share/seance/shell
+	install -m 0644 ../packaging/shell/seance.tcsh $(DESTDIR)$(PREFIX)/share/seance/shell/seance.tcsh
+	for s in 48 64 128 256; do install -d $(DESTDIR)$(PREFIX)/share/icons/hicolor/$${s}x$${s}/apps; \
+	  install -m 0644 ../packaging/icons/seance-$$s.png $(DESTDIR)$(PREFIX)/share/icons/hicolor/$${s}x$${s}/apps/seance.png; done
+	install -d $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps
+	install -m 0644 ../packaging/icons/seance.svg $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/seance.svg
 	install -d $(DESTDIR)$(PREFIX)/share/licenses/seance
 	install -m 0644 ../LICENSE ../NOTICE.md ../licenses/* $(DESTDIR)$(PREFIX)/share/licenses/seance/
 	cp -R $(CORE)/share/ghostty $(DESTDIR)$(PREFIX)/share/ghostty

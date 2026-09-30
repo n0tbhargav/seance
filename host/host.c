@@ -9,9 +9,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ghostty.h>
-#define SEANCE_VERSION "0.1.0"
+#define SEANCE_VERSION "0.1.1"
 #include <stdarg.h>
 #include <execinfo.h>
+#include <glib/gstdio.h>
 #include <dlfcn.h>
 #include <ucontext.h>
 #include <unistd.h>
@@ -26,6 +27,7 @@ typedef struct Pane {
   GtkIMContext *im;         // dead keys / compose / IMEs
   char *title;
   gboolean closing;
+  gboolean swallow_rclick;
   int id;                   // stable id used by the control socket
   guint64 sb_total, sb_off, sb_len;   // scrollbar state reported by the core
 } Pane;
@@ -44,6 +46,7 @@ static int next_pane_id = 1;
 static char *sock_path;       // control socket (exported to children as SEANCE_SOCKET)
 static void emit_event(const char *fmt, ...) G_GNUC_PRINTF(1, 2);
 
+static char *next_pane_command;   // one-shot command for the next pane_new (e.g. open the config in $EDITOR)
 static Pane *pane_new(Pane *inherit_from, ghostty_surface_context_e ctx);
 static void pane_close_now(Pane *p);
 
@@ -112,7 +115,11 @@ static GtkWidget *tab_root_of(Pane *p) {
 }
 
 static void update_tabs_visible(void) {
-  gtk_notebook_set_show_tabs(GTK_NOTEBOOK(H.nb), gtk_notebook_get_n_pages(GTK_NOTEBOOK(H.nb)) > 1);
+  const char *mode = "auto";   // Ghostty option window-show-tab-bar: auto | always | never
+  const char *v = NULL;
+  if (H.cfg && ghostty_config_get(H.cfg, &v, "window-show-tab-bar", 19) && v) mode = v;
+  gboolean show = !strcmp(mode, "always") || (!strcmp(mode, "auto") && gtk_notebook_get_n_pages(GTK_NOTEBOOK(H.nb)) > 1);
+  gtk_notebook_set_show_tabs(GTK_NOTEBOOK(H.nb), show);
 }
 
 // ---------------------------------------------------------------- theme (colors come from the Ghostty config)
@@ -885,11 +892,120 @@ static gboolean on_key(GtkWidget *w, GdkEventKey *e, gpointer ud) {
   return TRUE;
 }
 
+// ---------------------------------------------------------------- menus (right-click context menu, hamburger menu)
+static void menu_binding(GtkMenuItem *mi, gpointer ud) {   // simple core actions on the pane: copy/paste/select-all
+  (void)mi;
+  Pane *p = live_pane(g_object_get_data(G_OBJECT(mi), "pane"));
+  const char *act = ud;
+  if (p) ghostty_surface_binding_action(p->surface, act, strlen(act));
+}
+static void menu_new_tab(GtkMenuItem *mi, gpointer ud) { (void)mi; (void)ud; Pane *q = pane_new(H.focus, GHOSTTY_SURFACE_CONTEXT_TAB); if (q) add_tab(q); }
+static void menu_new_window(GtkMenuItem *mi, gpointer ud) {
+  (void)mi; (void)ud;
+  gchar *exe = g_file_read_link("/proc/self/exe", NULL);
+  if (exe) { gchar *argv[] = {exe, NULL}; g_spawn_async(NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, NULL); g_free(exe); }
+}
+static void menu_split(GtkMenuItem *mi, gpointer ud) { (void)mi; if (H.focus) split_pane(H.focus, (ghostty_action_split_direction_e)GPOINTER_TO_INT(ud)); }
+static void menu_close_pane(GtkMenuItem *mi, gpointer ud) { (void)mi; (void)ud; if (H.focus && !H.focus->closing) ghostty_surface_request_close(H.focus->surface); }
+static void menu_reload(GtkMenuItem *mi, gpointer ud) { (void)mi; (void)ud; g_idle_add(reload_config_cb, NULL); }
+static void menu_fullscreen(GtkMenuItem *mi, gpointer ud) {
+  (void)mi; (void)ud;
+  GdkWindow *gw = gtk_widget_get_window(H.win);
+  if (gw && (gdk_window_get_state(gw) & GDK_WINDOW_STATE_FULLSCREEN)) gtk_window_unfullscreen(GTK_WINDOW(H.win));
+  else gtk_window_fullscreen(GTK_WINDOW(H.win));
+}
+static void menu_open_config(GtkMenuItem *mi, gpointer ud) {   // open the config in $EDITOR inside a new tab (works on headless-ish VMs too)
+  (void)mi; (void)ud;
+  gchar *path = g_build_filename(g_get_user_config_dir(), "ghostty", "config.ghostty", NULL);
+  gchar *q = g_shell_quote(path);
+  g_free(next_pane_command);
+  next_pane_command = g_strdup_printf("${EDITOR:-vi} %s", q);
+  Pane *np = pane_new(H.focus, GHOSTTY_SURFACE_CONTEXT_TAB);
+  if (np) add_tab(np);
+  g_free(q); g_free(path);
+}
+static void menu_about(GtkMenuItem *mi, gpointer ud) {
+  (void)mi; (void)ud;
+  GtkWidget *d = gtk_about_dialog_new();
+  gtk_about_dialog_set_program_name(GTK_ABOUT_DIALOG(d), "Séance");
+  gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(d), SEANCE_VERSION);
+  gtk_about_dialog_set_comments(GTK_ABOUT_DIALOG(d), "A GTK3 terminal for SLES 15 SP4, built on the Ghostty terminal core.\\nSoftware-rendered: no GPU required.");
+  gtk_about_dialog_set_website(GTK_ABOUT_DIALOG(d), "https://github.com/n0tbhargav/seance");
+  gtk_about_dialog_set_license_type(GTK_ABOUT_DIALOG(d), GTK_LICENSE_MIT_X11);
+  gtk_about_dialog_set_copyright(GTK_ABOUT_DIALOG(d), "Séance is independent of the Ghostty project. Ghostty © Mitchell Hashimoto and contributors (MIT).");
+  gtk_window_set_transient_for(GTK_WINDOW(d), GTK_WINDOW(H.win));
+  gtk_dialog_run(GTK_DIALOG(d));
+  gtk_widget_destroy(d);
+}
+static void menu_quit(GtkMenuItem *mi, gpointer ud) { (void)mi; (void)ud; gtk_main_quit(); }
+
+static void menu_add(GtkWidget *menu, const char *label, GCallback cb, gpointer data, Pane *p, gboolean enabled) {
+  GtkWidget *mi = label ? gtk_menu_item_new_with_label(label) : gtk_separator_menu_item_new();
+  if (label) {
+    g_object_set_data(G_OBJECT(mi), "pane", p);
+    g_signal_connect(mi, "activate", cb, data);
+    gtk_widget_set_sensitive(mi, enabled);
+  }
+  gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);
+}
+
+// Terminal right-click menu (edit + window actions). Programs that capture the mouse still get right-clicks unless Shift is held.
+static void show_context_menu(Pane *p, GdkEvent *ev) {
+  GtkWidget *m = gtk_menu_new();
+  gboolean sel = ghostty_surface_has_selection(p->surface);
+  menu_add(m, "Copy", G_CALLBACK(menu_binding), "copy_to_clipboard", p, sel);
+  menu_add(m, "Paste", G_CALLBACK(menu_binding), "paste_from_clipboard", p, TRUE);
+  menu_add(m, "Select All", G_CALLBACK(menu_binding), "select_all", p, TRUE);
+  menu_add(m, NULL, NULL, NULL, p, TRUE);
+  menu_add(m, "New Tab", G_CALLBACK(menu_new_tab), NULL, p, TRUE);
+  menu_add(m, "New Window", G_CALLBACK(menu_new_window), NULL, p, TRUE);
+  menu_add(m, "Split Right", G_CALLBACK(menu_split), GINT_TO_POINTER(GHOSTTY_SPLIT_DIRECTION_RIGHT), p, TRUE);
+  menu_add(m, "Split Down", G_CALLBACK(menu_split), GINT_TO_POINTER(GHOSTTY_SPLIT_DIRECTION_DOWN), p, TRUE);
+  menu_add(m, NULL, NULL, NULL, p, TRUE);
+  menu_add(m, "Close Pane", G_CALLBACK(menu_close_pane), NULL, p, TRUE);
+  menu_add(m, NULL, NULL, NULL, p, TRUE);
+  menu_add(m, "Reload Configuration", G_CALLBACK(menu_reload), NULL, p, TRUE);
+  menu_add(m, "Open Configuration…", G_CALLBACK(menu_open_config), NULL, p, TRUE);
+  g_signal_connect(m, "deactivate", G_CALLBACK(on_menu_deactivate), NULL);
+  gtk_widget_show_all(m);
+  gtk_menu_popup_at_pointer(GTK_MENU(m), ev);
+}
+
+// "☰" button menu in the tab strip.
+static void on_hamburger_clicked(GtkButton *b, gpointer ud) {
+  (void)ud;
+  GtkWidget *m = gtk_menu_new();
+  Pane *p = H.focus;
+  menu_add(m, "New Tab", G_CALLBACK(menu_new_tab), NULL, p, TRUE);
+  menu_add(m, "New Window", G_CALLBACK(menu_new_window), NULL, p, TRUE);
+  menu_add(m, NULL, NULL, NULL, p, TRUE);
+  menu_add(m, "Split Right", G_CALLBACK(menu_split), GINT_TO_POINTER(GHOSTTY_SPLIT_DIRECTION_RIGHT), p, p != NULL);
+  menu_add(m, "Split Down", G_CALLBACK(menu_split), GINT_TO_POINTER(GHOSTTY_SPLIT_DIRECTION_DOWN), p, p != NULL);
+  menu_add(m, NULL, NULL, NULL, p, TRUE);
+  menu_add(m, "Reload Configuration", G_CALLBACK(menu_reload), NULL, p, TRUE);
+  menu_add(m, "Open Configuration…", G_CALLBACK(menu_open_config), NULL, p, TRUE);
+  menu_add(m, "Toggle Fullscreen", G_CALLBACK(menu_fullscreen), NULL, p, TRUE);
+  menu_add(m, NULL, NULL, NULL, p, TRUE);
+  menu_add(m, "About Séance", G_CALLBACK(menu_about), NULL, p, TRUE);
+  menu_add(m, "Quit", G_CALLBACK(menu_quit), NULL, p, TRUE);
+  g_signal_connect(m, "deactivate", G_CALLBACK(on_menu_deactivate), NULL);
+  gtk_widget_show_all(m);
+  gtk_menu_popup_at_widget(GTK_MENU(m), GTK_WIDGET(b), GDK_GRAVITY_SOUTH_WEST, GDK_GRAVITY_NORTH_WEST, NULL);
+}
+
 static gboolean on_button(GtkWidget *w, GdkEventButton *e, gpointer ud) {
   (void)w;
   Pane *p = ud;
   if (H.focus != p) set_focus_pane(p);
   if (e->type != GDK_BUTTON_PRESS && e->type != GDK_BUTTON_RELEASE) return TRUE;
+  if (e->button == 3) {   // right-click: our context menu, unless a program captured the mouse (Shift overrides)
+    if (e->type == GDK_BUTTON_PRESS && (!ghostty_surface_mouse_captured(p->surface) || (e->state & GDK_SHIFT_MASK))) {
+      p->swallow_rclick = TRUE;
+      show_context_menu(p, (GdkEvent *)e);
+      return TRUE;
+    }
+    if (e->type == GDK_BUTTON_RELEASE && p->swallow_rclick) { p->swallow_rclick = FALSE; return TRUE; }
+  }
   ghostty_input_mouse_button_e b = e->button == 1 ? GHOSTTY_MOUSE_LEFT
                                    : e->button == 2 ? GHOSTTY_MOUSE_MIDDLE
                                    : e->button == 3 ? GHOSTTY_MOUSE_RIGHT : GHOSTTY_MOUSE_UNKNOWN;
@@ -973,9 +1089,12 @@ static Pane *pane_new(Pane *inherit_from, ghostty_surface_context_e ctx) {
                                {.key = "SEANCE_PANE", .value = pane_id_str}};
   sc.env_vars = envs;
   sc.env_var_count = 2;
-  if (!inherit_from) sc.command = g_getenv("SEANCE_CMD");   // run a command instead of the login shell (scripting/benchmarks)
+  if (next_pane_command) sc.command = next_pane_command;
+  else if (!inherit_from) sc.command = g_getenv("SEANCE_CMD");   // run a command instead of the login shell (scripting/benchmarks)
   p->surface = ghostty_surface_new(H.app, &sc);
   g_free(pane_id_str);
+  g_free(next_pane_command);
+  next_pane_command = NULL;
   if (!p->surface) { g_printerr("ghostty_surface_new failed\n"); gtk_widget_destroy(p->area); g_free(p); return NULL; }
 
   p->im = gtk_im_multicontext_new();
@@ -1379,9 +1498,106 @@ static void locate_resources(void) {
 static void usage(void) {
   puts("seance " SEANCE_VERSION " - GTK3 terminal on the Ghostty core\n"
        "usage: seance [-e COMMAND...] [--size WxH] [--version] [--help]\n"
-       "  -e, --command CMD   run CMD instead of the login shell (rest of the line)\n"
-       "  --size WxH          initial window size in pixels (default 1000x640)\n"
+       "  -e, --command CMD        run CMD instead of the login shell (rest of the line)\n"
+       "  --size WxH               initial window size in pixels (default 1000x640)\n"
+       "  --install-desktop        add a launcher + icon for THIS install to ~/.local/share (menu entry); --uninstall-desktop removes it\n"
+       "  --shell-hook tcsh        print the line to add to ~/.tcshrc for prompt/cwd/command-finished integration\n"
        "config: ~/.config/ghostty/config.ghostty   control: seancectl (see $SEANCE_SOCKET)");
+}
+
+// ---------------------------------------------------------------- app icon, desktop entry, shell hook (no display needed)
+static gchar *exe_dir_path(void) {
+  gchar *exe = g_file_read_link("/proc/self/exe", NULL);
+  if (!exe) return NULL;
+  gchar *d = g_path_get_dirname(exe);
+  g_free(exe);
+  return d;
+}
+
+// Find a bundled file in the installed layout (<prefix>/bin/../share/...) or the source tree (host/../packaging/...).
+static gchar *find_bundled(const char *installed_rel, const char *devtree_rel) {
+  gchar *dir = exe_dir_path();
+  if (!dir) return NULL;
+  gchar *a = g_build_filename(dir, "..", installed_rel, NULL), *b = g_build_filename(dir, "..", devtree_rel, NULL);
+  gchar *hit = NULL;
+  if (g_file_test(a, G_FILE_TEST_EXISTS)) { hit = a; a = NULL; } else if (g_file_test(b, G_FILE_TEST_EXISTS)) { hit = b; b = NULL; }
+  g_free(a); g_free(b); g_free(dir);
+  if (hit) { char *rp = realpath(hit, NULL); if (rp) { g_free(hit); hit = g_strdup(rp); free(rp); } }
+  return hit;
+}
+
+static gchar *icon_file(int size) {
+  gchar *inst = g_strdup_printf("share/icons/hicolor/%dx%d/apps/seance.png", size, size);
+  gchar *dev = g_strdup_printf("packaging/icons/seance-%d.png", size);
+  gchar *r = find_bundled(inst, dev);
+  g_free(inst); g_free(dev);
+  return r;
+}
+
+static void load_app_icons(void) {
+  GList *icons = NULL;
+  static const int sizes[] = {48, 64, 128, 256};
+  for (size_t i = 0; i < G_N_ELEMENTS(sizes); i++) {
+    gchar *f = icon_file(sizes[i]);
+    if (!f) continue;
+    GdkPixbuf *pb = gdk_pixbuf_new_from_file(f, NULL);
+    if (pb) icons = g_list_append(icons, pb);
+    g_free(f);
+  }
+  if (icons) { gtk_window_set_default_icon_list(icons); g_list_free_full(icons, g_object_unref); }
+}
+
+static int install_desktop(gboolean remove_it) {
+  gchar *exe = g_file_read_link("/proc/self/exe", NULL);
+  if (!exe) { g_printerr("cannot resolve the executable path\n"); return 1; }
+  gchar *apps = g_build_filename(g_get_user_data_dir(), "applications", NULL);
+  gchar *desk = g_build_filename(apps, "seance.desktop", NULL);
+  gchar *icondir = g_build_filename(g_get_user_data_dir(), "icons", "hicolor", "256x256", "apps", NULL);
+  gchar *icon = g_build_filename(icondir, "seance.png", NULL);
+  int rc = 0;
+  if (remove_it) {
+    g_unlink(desk); g_unlink(icon);
+    g_print("removed %s and %s\n", desk, icon);
+  } else {
+    g_mkdir_with_parents(apps, 0755);
+    g_mkdir_with_parents(icondir, 0755);
+    gchar *src = icon_file(256), *data = NULL;
+    gsize len = 0;
+    if (src && g_file_get_contents(src, &data, &len, NULL)) g_file_set_contents(icon, data, (gssize)len, NULL);
+    else g_printerr("note: bundled icon not found, using the generic terminal icon\n");
+    g_free(src); g_free(data);
+    gboolean have_icon = g_file_test(icon, G_FILE_TEST_EXISTS);
+    gchar *content = g_strdup_printf(
+        "[Desktop Entry]\nType=Application\nName=Séance\nGenericName=Terminal\n"
+        "Comment=Terminal built on the Ghostty core, with agent control\n"
+        "Exec=\"%s\"\nTryExec=%s\nIcon=%s\nTerminal=false\nCategories=System;TerminalEmulator;\n"
+        "Keywords=shell;prompt;command;commandline;cmd;\nStartupWMClass=seance\n",
+        exe, exe, have_icon ? "seance" : "utilities-terminal");
+    if (!g_file_set_contents(desk, content, -1, NULL)) { g_printerr("cannot write %s\n", desk); rc = 1; }
+    else g_print("installed %s (Exec=%s)\n", desk, exe);
+    g_free(content);
+  }
+  // best-effort refresh of desktop/icon caches (ignore failures)
+  gchar *icroot = g_build_filename(g_get_user_data_dir(), "icons", "hicolor", NULL);
+  gchar *a1[] = {"update-desktop-database", apps, NULL};
+  gchar *a2[] = {"gtk-update-icon-cache", "-q", "-f", "-t", icroot, NULL};
+  g_spawn_sync(NULL, a1, NULL, G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+  g_spawn_sync(NULL, a2, NULL, G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+  g_free(icroot); g_free(apps); g_free(desk); g_free(icondir); g_free(icon); g_free(exe);
+  return rc;
+}
+
+// Print the line to add to a shell rc file so that shell integration works from a custom install path.
+static int print_shell_hook(const char *shell) {
+  if (strcmp(shell, "tcsh") != 0 && strcmp(shell, "csh") != 0) {
+    g_printerr("Ghostty's own integration already covers bash, zsh, fish, elvish and nushell (automatic).\nSupported here: tcsh\n");
+    return 2;
+  }
+  gchar *f = find_bundled("share/seance/shell/seance.tcsh", "packaging/shell/seance.tcsh");
+  if (!f) { g_printerr("seance.tcsh not found next to this installation\n"); return 1; }
+  g_print("if ($?SEANCE_PANE && -f \"%s\") source \"%s\"\n", f, f);
+  g_free(f);
+  return 0;
 }
 
 // On a crash, print a backtrace (host frames are symbolized when linked with -rdynamic) and die normally.
@@ -1425,7 +1641,12 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[i], "-e") || !strcmp(argv[i], "--command")) break;
     if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-v")) { puts("seance " SEANCE_VERSION); return 0; }
     if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(); return 0; }
+    if (!strcmp(argv[i], "--install-desktop")) return install_desktop(FALSE);
+    if (!strcmp(argv[i], "--uninstall-desktop")) return install_desktop(TRUE);
+    if (!strcmp(argv[i], "--shell-hook")) return print_shell_hook(i + 1 < argc ? argv[i + 1] : "");
   }
+  g_set_prgname("seance");
+  gdk_set_program_class("seance");   // WM_CLASS, matches StartupWMClass in the .desktop entry
   gtk_init(&argc, &argv);
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--size") && i + 1 < argc) { g_setenv("SEANCE_SIZE", argv[++i], TRUE); continue; }
@@ -1497,6 +1718,7 @@ int main(int argc, char **argv) {
     if (g_getenv("SEANCE_STATS")) g_printerr("translucency: rgba visual=%d composited=%d\n", vis != NULL, composited_ok);
   }
   apply_theme();
+  load_app_icons();
   {
     GtkWidget *plus = gtk_button_new_with_label("+");
     gtk_button_set_relief(GTK_BUTTON(plus), GTK_RELIEF_NONE);
@@ -1506,6 +1728,14 @@ int main(int argc, char **argv) {
     g_signal_connect(plus, "clicked", G_CALLBACK(on_menu_new), NULL);
     gtk_notebook_set_action_widget(GTK_NOTEBOOK(H.nb), plus, GTK_PACK_END);
     gtk_widget_show(plus);
+    GtkWidget *burger = gtk_button_new_with_label("☰");
+    gtk_button_set_relief(GTK_BUTTON(burger), GTK_RELIEF_NONE);
+    gtk_widget_set_focus_on_click(burger, FALSE);
+    gtk_widget_set_tooltip_text(burger, "Menu");
+    gtk_style_context_add_class(gtk_widget_get_style_context(burger), "seance-newtab");
+    g_signal_connect(burger, "clicked", G_CALLBACK(on_hamburger_clicked), NULL);
+    gtk_notebook_set_action_widget(GTK_NOTEBOOK(H.nb), burger, GTK_PACK_START);
+    gtk_widget_show(burger);
   }
   gtk_widget_show_all(H.win);          // realize the window first: pane_new reads its scale factor
   Pane *first = pane_new(NULL, GHOSTTY_SURFACE_CONTEXT_WINDOW);

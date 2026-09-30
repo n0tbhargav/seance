@@ -168,6 +168,16 @@ Read this first when resuming. Plan: PLAN.md. Memory: seance-terminal-project.
 - **Core patch #2 (in patches/0001):** presentation_health defaults to .unhealthy on Linux+embedded (fixes NULL-call crash in Mesa EGL on 2nd+ surface).
   Build note: rebuilding the core with -Demit-terminfo overwrites full/share/terminfo with macOS hex dirs -> re-run Linux `tic` (see README/PROGRESS).
 
+- **v0.1.1 pass (user Q&A driven; committed locally, NOT yet pushed/released):**
+  glyph `⏵` (U+23F5) = missing-font issue (no default SUSE font has it; `noto-sans-symbols2-fonts` fixes it, Séance's fontconfig fallback picks it up
+  automatically — verified); default keybinds work (Ctrl+Shift+T/O/E verified; an earlier "not working" was my test window being shorter than the Xvfb pointer);
+  app icon (original SVG + 48/64/128/256 PNGs; window icon list, WM_CLASS=seance, RPM symlinks into hicolor + icon-cache scriptlets, desktop Icon=seance);
+  `seance --install-desktop/--uninstall-desktop` (custom paths, spaces OK, passes desktop-file-validate); `--shell-hook tcsh`;
+  tcsh integration hook (packaging/shell/seance.tcsh: OSC 133 A/B/C/D, OSC 7 cwd, OSC 2 title, preserves SUSE's precmd via save+source) verified with real tcsh
+  (exit codes, durations, titles, new tab in same cwd); right-click context menu + ☰ hamburger menu (About/Open Config/Reload/Fullscreen/Quit) verified via keyboard nav;
+  `window-show-tab-bar` honored; docs ("Using Séance" in README: keys, menus, icon, custom path, fonts, tcsh, SSH/TERM). gui2 coordinates updated for the ☰ button.
+  Tests added: glyph.sh keys.sh menus.sh tcsh.sh custompath.sh. Ghostty has NO tcsh integration upstream (bash/zsh/fish/elvish/nushell only).
+
 ## Next
 1. Real-app tests: vim, tmux, less, htop-like (test/apps.sh); double/triple-click word/line select.
 2. Redraw efficiency; vtebench baseline vs. xterm/VTE if available.

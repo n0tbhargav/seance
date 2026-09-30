@@ -1,6 +1,6 @@
 # Third-party notices
 
-Séance's own code (`host/`, `src/`, `test/`, `scripts/`, `packaging/`) is MIT-licensed (see `LICENSE`).
+Séance's own code (`host/`, `src/`, `test/`, `scripts/`, `packaging/`, including the app icon and the tcsh hook) is MIT-licensed (see `LICENSE`).
 
 **Séance is an independent project and is not affiliated with, endorsed by, or maintained by the Ghostty project.**
 "Ghostty" is the name of another project; it is used here only to describe what Séance is built on.
